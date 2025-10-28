@@ -22,9 +22,23 @@ class RoundRobinGlobalScheduler(BaseGlobalScheduler):
         self.sort_requests()
 
         request_mapping = []
+
+        # Get list of available replica IDs (not marked to be freed)
+        available_replica_ids = sorted([
+            replica_id
+            for replica_id in self._replica_schedulers.keys()
+            if not self.check_replica_to_free(replica_id)
+        ])
+
+        # If no available replicas, return empty list
+        if not available_replica_ids:
+            return request_mapping
+
         while self._request_queue:
             request = self._request_queue.pop(0)
-            replica_id = self._request_counter % self._num_replicas
+            # Use modulo with available replicas length
+            replica_idx = self._request_counter % len(available_replica_ids)
+            replica_id = available_replica_ids[replica_idx]
             self._request_counter += 1
             request_mapping.append((replica_id, request))
 
