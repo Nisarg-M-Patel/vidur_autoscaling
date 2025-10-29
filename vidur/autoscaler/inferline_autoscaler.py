@@ -36,7 +36,7 @@ class NetworkEnvelope:
         Update the network envelope with the arrival of a new request.
         """
         total_tokens = request.num_prefill_tokens + request.num_decode_tokens
-        self._arrivals.append(request.arrived_at, total_tokens)
+        self._arrivals.append((request.arrived_at, total_tokens))
 
     def get_max_request_rate(self, time: float, window_size: float, look_back_time: float) -> float:
         """
@@ -86,72 +86,7 @@ class NetworkEnvelope:
         return max_rate
         
 
-##optimized network envelope##
-from collections import defaultdict, deque
-import bisect
 
-class OptimizedNetworkEnvelope:
-    def __init__(self, autoscaler_config, bucket_size=1.0):
-        self._min_window_size_scale_up = autoscaler_config.min_window_size_scale_up
-        self._min_window_size_scale_down = autoscaler_config.min_window_size_scale_down
-        self._look_back_time_scale_up = autoscaler_config.look_back_time_scale_up
-        self._look_back_time_scale_down = autoscaler_config.look_back_time_scale_down
-        
-        self._bucket_size = bucket_size
-        self._buckets = defaultdict(int) 
-        self._bucket_times = []  
-        
-    def _get_bucket_id(self, time):
-        return int(time // self._bucket_size)
-    
-    def _get_bucket_start(self, bucket_id):
-        return bucket_id * self._bucket_size
-
-    def on_request_arrival(self, request):
-        total_tokens = request.num_prefill_tokens + request.num_decode_tokens
-        bucket_id = self._get_bucket_id(request.arrived_at)
-        
-        if bucket_id not in self._buckets:
-            bucket_start = self._get_bucket_start(bucket_id)
-            bisect.insort(self._bucket_times, bucket_start)
-        
-        self._buckets[bucket_id] += total_tokens
-
-    def get_max_request_rate(self, time, window_size, look_back_time):
-        if window_size <= 0:
-            return 0.0
-            
-        cutoff_time = time - look_back_time
-        while self._bucket_times and self._bucket_times[0] < cutoff_time:
-            old_bucket_start = self._bucket_times.pop(0)
-            old_bucket_id = self._get_bucket_id(old_bucket_start)
-            del self._buckets[old_bucket_id]
-        
-        if not self._buckets:
-            return 0.0
-        
-        
-        
-        max_rate = 0.0
-        num_buckets_in_window = max(1, int(window_size / self._bucket_size))
-        
-        start_bucket_id = self._get_bucket_id(cutoff_time)
-        end_bucket_id = self._get_bucket_id(time)
-        
-        for bucket_start in range(start_bucket_id, end_bucket_id - num_buckets_in_window + 2):
-            window_tokens = 0
-            
-            for i in range(num_buckets_in_window):
-                bucket_id = bucket_start + i
-                if bucket_id in self._buckets:
-                    window_tokens += self._buckets[bucket_id]
-            
-            actual_window_size = min(window_size, num_buckets_in_window * self._bucket_size)
-            if actual_window_size > 0:
-                rate = window_tokens / actual_window_size
-                max_rate = max(max_rate, rate)
-        
-        return max_rate
     
 
 class InferlineAutoscaler(BaseAutoscaler):
@@ -172,6 +107,7 @@ class InferlineAutoscaler(BaseAutoscaler):
     
         self._replica_token_throughput = self._autoscaler_config.initial_replica_token_throughput
         self._throughput_alpha = self._autoscaler_config.throughput_alpha
+        self._last_scale_up_time = -float('inf')
 
         self._network_envelope = NetworkEnvelope(autoscaler_config)
 
@@ -190,7 +126,23 @@ class InferlineAutoscaler(BaseAutoscaler):
         """
         Update the replica token throughput based on completed batch. Use exponential moving average to update the replica token throughput.
         """
-        pass
+        if batch.scheduled_at is None or batch.completed_at is None:
+            return
+            
+        execution_time = batch.completed_at - batch.scheduled_at
+        if execution_time <= 0:
+            return
+            
+        total_tokens = sum(batch.num_tokens)
+        if total_tokens <= 0:
+            return
+            
+        batch_throughput = total_tokens / execution_time
+        
+        self._replica_token_throughput = (
+            self._throughput_alpha * batch_throughput + 
+            (1 - self._throughput_alpha) * self._replica_token_throughput
+        )
     
     def tune(self, time: float) -> int:
         """
@@ -208,4 +160,38 @@ class InferlineAutoscaler(BaseAutoscaler):
         2. Check for scale up first, then scale down.
         3. self._num_pending_scale_ups and self._num_pending_scale_downs are the number of pending scale ups and scale downs respectively. Make sure to account for these.
         """
-        pass
+        max_arrival_rate_scale_up = self._network_envelope.get_max_request_rate(
+            time, 
+            self._autoscaler_config.min_window_size_scale_up,
+            self._autoscaler_config.look_back_time_scale_up
+        )
+        
+        max_arrival_rate_scale_down = self._network_envelope.get_max_request_rate(
+            time,
+            self._autoscaler_config.min_window_size_scale_down, 
+            self._autoscaler_config.look_back_time_scale_down
+        )
+        
+        current_replicas = self.num_replicas + self._num_pending_scale_ups - self._num_pending_scale_downs
+        
+        if self._replica_token_throughput > 0:
+            target_replicas_up = math.ceil(max_arrival_rate_scale_up / self._replica_token_throughput)
+            
+            if target_replicas_up > current_replicas:
+                scale_up_needed = target_replicas_up - current_replicas
+                self._last_scale_up_time = time
+                return scale_up_needed
+        
+        time_since_last_scale_up = time - self._last_scale_up_time
+        can_scale_down = time_since_last_scale_up >= self._autoscaler_config.stabilization_delay
+        
+        if can_scale_down and self._replica_token_throughput > 0:
+            target_replicas_down = math.ceil(max_arrival_rate_scale_down / self._replica_token_throughput)
+            
+            target_replicas_down = max(1, target_replicas_down)
+            
+            if target_replicas_down < current_replicas:
+                scale_down_needed = target_replicas_down - current_replicas
+                return scale_down_needed
+        
+        return 0

@@ -64,7 +64,7 @@ class Simulator:
         self._metric_store.on_autoscaling_event(
             0, self._cluster.num_replicas, self._cluster.cost_per_hour
         )
-        atexit.register(self._write_output)
+        #atexit.register(self._write_output)
 
     @property
     def scheduler(self) -> BaseGlobalScheduler:
