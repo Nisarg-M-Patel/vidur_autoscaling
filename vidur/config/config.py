@@ -628,15 +628,15 @@ class BaseAutoscalerConfig(BasePolyConfig):
     """Autoscaler configuration."""
 
     tune_interval: float = field(
-        default=5,
+        default=4,
         metadata={"help": "Tune interval."},
     )
     scale_up_delay: float = field(
-        default=10,
+        default=6,
         metadata={"help": "Scale up delay."},
     )
     scale_down_delay: float = field(
-        default=0,
+        default=8,
         metadata={"help": "Scale down delay."},
     )
     service_level: int = field(
@@ -679,7 +679,7 @@ class InferlineAutoscalerConfig(BaseAutoscalerConfig):
         metadata={"help": "Stabilization delay."},
     )
     initial_replica_token_throughput: float = field(
-        default=1,
+        default=1.0,
         metadata={"help": "Initial replica token throughput."},
     )
     throughput_alpha: float = field(
