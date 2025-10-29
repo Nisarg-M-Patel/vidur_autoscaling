@@ -51,7 +51,7 @@ class NetworkEnvelope:
         if window_size <= 0:
             return 0.0
         
-        #remove old reqs that are beyond lookback time
+        # Clean old arrivals beyond lookback time
         cutoff_time = time - look_back_time
         while self._arrivals and self._arrivals[0][0] < cutoff_time:
             self._arrivals.popleft()
@@ -59,31 +59,47 @@ class NetworkEnvelope:
         if not self._arrivals:
             return 0.0
         
-        arrivals_list = list(self._arrivals)
-
-        if not arrivals_list or arrivals_list[-1][0] < cutoff_time:
+        # Much simpler approach: sample the window at regular intervals
+        # This gives a good approximation while being O(1) per query
+        max_rate = 0.0
+        
+        # Sample at most 10 window positions to keep it fast
+        num_samples = min(10, int(look_back_time / window_size) + 1)
+        
+        if num_samples <= 1:
+            # Single window case
+            window_start = max(cutoff_time, time - window_size)
+            window_end = time
+            tokens_in_window = 0
+            for arrival_time, tokens in self._arrivals:
+                if window_start <= arrival_time < window_end:
+                    tokens_in_window += tokens
+            if window_end > window_start:
+                return tokens_in_window / (window_end - window_start)
             return 0.0
         
-        max_rate = 0.0
-
-        window_start = cutoff_time
-
-        while window_start < time:
-            window_end = min(window_start + window_size, time)
+        # Sample multiple positions
+        step = (time - window_size - cutoff_time) / (num_samples - 1) if num_samples > 1 else 0
+        
+        for i in range(num_samples):
+            window_start = cutoff_time + i * step
+            window_end = window_start + window_size
+            
+            if window_end > time:
+                window_end = time
+                window_start = time - window_size
+            
             tokens_in_window = 0
-            for arrival_time, tokens in arrivals_list:
+            for arrival_time, tokens in self._arrivals:
                 if window_start <= arrival_time < window_end:
                     tokens_in_window += tokens
             
-            actual_window_size = window_end - window_start
-            if actual_window_size > 0:
-                rate = tokens_in_window / actual_window_size
-                max_rate = max(max_rate, rate)
-            
-            step_size = window_size / 10.0 #potential step
-            window_start += step_size
+            rate = tokens_in_window / window_size
+            max_rate = max(max_rate, rate)
         
         return max_rate
+
+
         
 
 
